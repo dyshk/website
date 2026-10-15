@@ -1,0 +1,102 @@
+# =============================================================================
+#  LNMP 测试站 —— 通用 Nginx 配置模板
+# =============================================================================
+#  特点：不绑定发行版、PHP 版本、域名、目录名，改 3 处即可使用。
+#  Ubuntu / Debian / CentOS / Rocky / AlmaLinux / Alpine 均可直接套用。
+#
+#  三步走：
+#    1) 复制到本机的站点配置目录，随便起个名字（如 web-test.conf）
+#         Debian / Ubuntu : /etc/nginx/sites-available/   （再 ln -s 到 sites-enabled/）
+#         CentOS / Rocky  : /etc/nginx/conf.d/            （直接生效，无需软链接）
+#    2) 改掉下面 3 处标着「← 改这里」的地方
+#    3) sudo nginx -t && sudo systemctl reload nginx
+# =============================================================================
+
+server {
+    listen      80;
+    listen [::]:80;
+
+    # 【改这里 1】域名或服务器 IP，多个用空格分隔。
+    # 不确定写什么就填 _（表示"任意"），谁访问都进这个站。
+    server_name _;
+
+    # 【改这里 2】web-test 目录的绝对路径（目录传到哪里就写哪里）。
+    # 本站所有 php 都靠它定位：上传的图片、后台生成的 config.php 都在这个目录下。
+    root  /var/www/web-test;
+
+    index index.php index.html;
+
+    # 允许上传图片；不设的话 Nginx 默认只收 1 MB，稍大的图会被挡（413）
+    client_max_body_size 8m;
+
+    # ------------------------------- 路由 -------------------------------
+    location / {
+        # 有真实文件就直接返回（uploads/xxx.jpg、静态资源走这条，不经过 PHP）；
+        # 都没有就落到 board.php —— 所以根路径和 /board.php 都能打开留言板。
+        try_files $uri $uri/ /board.php?$query_string;
+    }
+
+    # 伪静态：把 /note/3 变成 /board.php?act=detail&id=3
+    # 删掉也不影响功能（只是"固定链接"会变成带参数的地址）
+    location ~ ^/note/(\d+)/?$ {
+        rewrite ^/note/(\d+)/?$ /board.php?act=detail&id=$1 last;
+    }
+
+    # uploads/ 只当图片目录：就算有人传上来 .php，也一律不许执行
+    location ~* ^/uploads/.*\.(php|phtml|phar|php[0-9])$ {
+        deny all;
+    }
+
+    # ------------------------------- PHP --------------------------------
+    location ~ \.php$ {
+        # 脚本必须真实存在，避免把任意路径交给 php-fpm 去解析
+        try_files $uri =404;
+
+        # 用发行版自带的 fastcgi_params（各系统都有），比 snippets/fastcgi-php.conf 更通用
+        include        fastcgi_params;
+        fastcgi_param  SCRIPT_FILENAME  $document_root$fastcgi_script_name;
+        fastcgi_index  index.php;
+
+        # 【改这里 3】php-fpm 的监听地址，三选一。
+        # 先执行 `ls /run/php/`（或 `ss -lntp | grep 9000`）确认真实值，再保留对应那一行：
+        fastcgi_pass   unix:/run/php/php-fpm.sock;    # Ubuntu / Debian：如 php8.3-fpm.sock、php8.5-fpm.sock
+        # fastcgi_pass unix:/run/php-fpm/www.sock;    # CentOS / Rocky / Alma：默认 www.sock
+        # fastcgi_pass 127.0.0.1:9000;                # php-fpm 监听 TCP 端口时
+    }
+}
+
+# =============================================================================
+#  情况 B：web-test 只是某个已有站点的子目录（访问 http://域名/web-test/）
+# -----------------------------------------------------------------------------
+#  不要整块复制本文件，改为在你自己那个 server 块里追加下面这几段
+#  （路径按实际改；注意 /web-test/ 前后斜杠）：
+#
+#      location ^~ /web-test/ {
+#          alias  /var/www/你的站点/web-test/;          # alias 结尾必须带斜杠
+#          index  index.php index.html;
+#          try_files $uri $uri/ /web-test/board.php?$query_string;
+#      }
+#      location ~ ^/web-test/note/(\d+)/?$ {
+#          rewrite ^/web-test/note/(\d+)/?$ /web-test/board.php?act=detail&id=$1 last;
+#      }
+#      location ~* ^/web-test/uploads/.*\.(php|phtml|phar|php[0-9])$ { deny all; }
+#
+#  说明：alias 与 root 的语义不同，混用容易出现 404 或目录穿越；
+#        如果按上面配完仍打不开 PHP，最简单可靠的办法是——
+#        把 web-test 单独做成一个站点（即上面的「情况 A」），用子域名或端口区分。
+# =============================================================================
+
+# =============================================================================
+#  上线前自检（任何环境建议都跑一遍）
+# -----------------------------------------------------------------------------
+#      ls /run/php/                   # 看 php-fpm 的 socket 真实文件名
+#      nginx -t                       # 语法校验，看到 test is successful 才继续
+#      systemctl reload nginx         # 重载生效
+#      curl -I http://127.0.0.1/      # 应返回 200 或 302，不是 502
+#
+#  三个最容易踩的点：
+#      502 → fastcgi_pass 的 socket 名或路径不对（改这里 3）
+#      404 → root 写错，或 web-test 文件没传进去（改这里 2）
+#      403 → 目录权限不对，执行 chown -R <php-fpm 用户> <站点目录>
+#            （Debian/Ubuntu 是 www-data，CentOS 系是 nginx 或 apache）
+# =============================================================================
